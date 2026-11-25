@@ -86,7 +86,7 @@ CONFIGURABLE_DISK_SIZE = Range[Memory](
 RESOURCE_ADVICE_CACHE_TTL = 600
 """Seconds to cache tenant advice across offer refreshes; matches AWS's quota cache."""
 WAIT_FOR_DISK_TIMEOUT = 20
-WAIT_FOR_PRICING_POLICY_TIMEOUT = 10
+WAIT_FOR_PRICING_POLICY_TIMEOUT = 30
 WAIT_FOR_INSTANCE_TIMEOUT = 30
 WAIT_FOR_INSTANCE_UPDATE_INTERVAL = 2.5
 DELETE_INSTANCE_TIMEOUT = 25
@@ -106,6 +106,7 @@ SUPPORTED_PLATFORMS = [
     "gpu-h200-sxm",
     "gpu-b200-sxm",
     "gpu-b200-sxm-a",
+    "gpu-b300-sxm",
     "gpu-l40s-a",
     "gpu-l40s-d",
     "gpu-rtx6000",
