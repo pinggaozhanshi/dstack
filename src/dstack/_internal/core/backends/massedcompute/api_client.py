@@ -8,13 +8,15 @@ from typing_extensions import NotRequired, TypedDict
 
 from dstack._internal.core.errors import BackendAuthError, ComputeError, VolumeDeletionPending
 from dstack._internal.core.models.common import CoreModel, validate_json_extra_ignore
+from dstack._internal.utils.logging import get_logger
 
 API_URL = "https://vm.massedcompute.com/api/v1"
 _T = TypeVar("_T", bound=CoreModel)
+logger = get_logger(__name__)
 
 
 class MassedComputeInstance(CoreModel):
-    uuid: str
+    uuid: UUID
     name: str
     status: str
     ip: Optional[str] = None
@@ -24,7 +26,7 @@ class MassedComputeInstance(CoreModel):
 
 
 class _AttachedInstance(CoreModel):
-    uuid: str
+    uuid: UUID
 
 
 class _VolumeIdentity(CoreModel):
@@ -82,6 +84,10 @@ class _TerminateRequest(TypedDict, closed=True):
     instanceUuids: list[str]
 
 
+class _UnconfirmedResponse(ComputeError):
+    """The request may have succeeded without a usable response."""
+
+
 class MassedComputeAPIClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -95,11 +101,10 @@ class MassedComputeAPIClient:
 
     def launch(
         self, name: str, product: str, command: str, volume_ids: Optional[list[str]] = None
-    ) -> str:
-        """Launch once using a unique name. If the response is lost, look up that name.
+    ) -> Optional[str]:
+        """Send one launch request. Return its UUID, or None if it must be looked up by name.
 
-        Return the VM ID only when creation is confirmed. If the VM is not yet visible,
-        propagate the launch error. Its name still lets orphan cleanup find it later.
+        A rejected request raises a backend error so the caller can try another offer.
         """
         payload: _LaunchRequest = {
             "instanceName": name,
@@ -114,14 +119,18 @@ class MassedComputeAPIClient:
         try:
             response = self._request("POST", "/instance/launch", payload)
             return str(_parse_response(_LaunchResponse, response).response)
-        except ComputeError:
-            matches = [vm.uuid for vm in self.list_instances() if vm.name == name]
-            if len(matches) != 1:
-                raise
-            return matches[0]
+        except _UnconfirmedResponse as e:
+            logger.warning("MassedCompute launch of %s is unconfirmed: %s", name, e)
+            return None
 
     def list_instances(self) -> list[MassedComputeInstance]:
         return _parse_response(_Instances, self._request("GET", "/instance")).instances
+
+    def get_instance_by_name(self, name: str) -> Optional[MassedComputeInstance]:
+        matches = [vm for vm in self.list_instances() if vm.name == name]
+        if len(matches) > 1:
+            raise ComputeError(f"Multiple MassedCompute instances match launch name {name}")
+        return matches[0] if matches else None
 
     def get_instance(self, instance_id: str) -> Optional[MassedComputeInstance]:
         response = self._request("GET", "/instance/" + quote(instance_id, safe=""))
@@ -129,7 +138,7 @@ class MassedComputeAPIClient:
         instances = _parse_response(_Instances, response).instances
         if not instances:
             return None
-        if len(instances) != 1 or instances[0].uuid != instance_id:
+        if len(instances) != 1 or str(instances[0].uuid) != instance_id.lower():
             raise ComputeError("MassedCompute returned an unexpected instance ID")
         return instances[0]
 
@@ -174,12 +183,19 @@ class MassedComputeAPIClient:
                 allow_redirects=False,  # A redirect can replay a launch POST.
                 headers={"Authorization": f"Bearer {self.api_key}"},
             )
+        except requests.ConnectTimeout:
+            raise ComputeError(f"MassedCompute {method} {path}: ConnectTimeout") from None
         except requests.RequestException as e:
-            raise ComputeError(f"MassedCompute {method} {path}: {type(e).__name__}") from None
+            raise _UnconfirmedResponse(
+                f"MassedCompute {method} {path}: {type(e).__name__}"
+            ) from None
         if response.status_code == 401:
             raise BackendAuthError("Invalid MassedCompute API key")
         if not 200 <= response.status_code < 300 and response.status_code not in allowed_statuses:
-            raise ComputeError(f"MassedCompute {method} {path}: HTTP {response.status_code}")
+            error = f"MassedCompute {method} {path}: HTTP {response.status_code}"
+            if 400 <= response.status_code < 500 and response.status_code != 408:
+                raise ComputeError(error)
+            raise _UnconfirmedResponse(error)
         return response
 
 
@@ -188,4 +204,4 @@ def _parse_response(model: type[_T], response: requests.Response) -> _T:
         return validate_json_extra_ignore(model, response.content)
     except ValidationError:
         # Instance payloads contain plaintext passwords, including in Pydantic's error inputs.
-        raise ComputeError("Unexpected response from MassedCompute") from None
+        raise _UnconfirmedResponse("Unexpected response from MassedCompute") from None

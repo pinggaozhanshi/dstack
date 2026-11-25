@@ -47,6 +47,14 @@ async def terminate_instance(
             )
             result.release_volume_attachments = has_exclusive_volumes
         except Exception as exc:
+            if isinstance(exc, NotYetTerminated) and exc.instance_id is not None:
+                job_provisioning_data.instance_id = exc.instance_id
+                job_provisioning_data.backend_data = exc.backend_data
+                result.instance_update_map["job_provisioning_data"] = (
+                    job_provisioning_data.model_dump_json()
+                )
+                result.instance_update_map["first_termination_retry_at"] = NOW_PLACEHOLDER
+                return result
             first_retry_at = instance_model.first_termination_retry_at
             if first_retry_at is None:
                 first_retry_at = now
@@ -75,8 +83,8 @@ async def terminate_instance(
                     < get_termination_deadline(first_retry_at)
                 ):
                     result.event_messages.append(
-                        "Volume attachments retained. Restore access to the VM and storage, "
-                        "or terminate the VM in the provider. dstack will keep retrying. "
+                        "Volume attachments retained until dstack confirms the VM is gone. "
+                        "dstack will keep retrying. "
                         f"Last error: {_format_error(exc)}"
                     )
                 logger.warning("Instance %s termination pending: %r", instance_model.name, exc)

@@ -22,6 +22,7 @@ from dstack._internal.core.backends.base.compute import (
 from dstack._internal.core.backends.base.offers import get_catalog_offers
 from dstack._internal.core.backends.massedcompute.api_client import (
     MassedComputeAPIClient,
+    MassedComputeInstance,
     MassedComputeVolume,
 )
 from dstack._internal.core.backends.massedcompute.models import MassedComputeConfig
@@ -39,6 +40,7 @@ from dstack._internal.core.models.backends.orphans import (
     OwnerType,
     ResourceListing,
 )
+from dstack._internal.core.models.common import CoreModel, validate_json_extra_ignore
 from dstack._internal.core.models.instances import (
     InstanceAvailability,
     InstanceConfiguration,
@@ -94,7 +96,7 @@ class MassedComputeCompute(
         return JobProvisioningData(
             backend=instance_offer.backend,
             instance_type=instance_offer.instance,
-            instance_id=instance_id,
+            instance_id=instance_id or name,
             hostname=None,
             internal_ip=None,
             region=instance_offer.region,
@@ -104,7 +106,7 @@ class MassedComputeCompute(
             dockerized=True,
             ssh_proxy=None,
             volume_mounts=volume_mounts or None,
-            backend_data=None,
+            backend_data=_MassedComputeLaunch(name=name).model_dump_json(),
         )
 
     def update_provisioning_data(
@@ -113,9 +115,17 @@ class MassedComputeCompute(
         project_ssh_public_key: str,
         project_ssh_private_key: str,
     ) -> None:
-        instance = self.api_client.get_instance(provisioning_data.instance_id)
+        instance = self._get_instance(
+            provisioning_data.instance_id, provisioning_data.backend_data
+        )
         if instance is None:
             return
+        if provisioning_data.backend_data is not None:
+            provisioning_data.instance_id = str(instance.uuid)
+            provisioning_data.backend_data = None
+            if provisioning_data.volume_mounts:
+                # Persist the confirmed UUID before a guest mount check can delay admission.
+                return
         if instance.status.lower() == "stopped":
             raise ProvisioningError("MassedCompute instance stopped during provisioning")
         if instance.os_booted and instance.ip and instance.username:
@@ -137,12 +147,35 @@ class MassedComputeCompute(
     def terminate_instance(
         self, instance_id: str, region: str, backend_data: Optional[str] = None
     ) -> None:
-        instance = self.api_client.get_instance(instance_id)
+        instance = self._get_instance(instance_id, backend_data)
+        if backend_data is not None:
+            if instance is None:
+                # The API has no launch status or visibility deadline. If this VM never
+                # appears, termination cannot release its exclusive volumes automatically.
+                raise ComputeError(f"MassedCompute has not returned VM details for {instance_id}")
+            # Record that the VM was visible by UUID before deleting it.
+            raise NotYetTerminated(
+                f"Found MassedCompute instance {instance.uuid} for {instance_id}",
+                instance_id=str(instance.uuid),
+            )
         if instance is None:
             return
         if instance.status.lower() not in {"terminating", "deleting"}:
             self.api_client.terminate(instance_id)
         raise NotYetTerminated(f"Waiting for MassedCompute instance {instance_id} to terminate")
+
+    def _get_instance(
+        self, instance_id: str, backend_data: Optional[str]
+    ) -> Optional[MassedComputeInstance]:
+        """Read VM details by UUID, recovering a lost launch reply by its exact name."""
+        if backend_data is not None:
+            launch = validate_json_extra_ignore(_MassedComputeLaunch, backend_data)
+            if launch.name == instance_id:
+                instance = self.api_client.get_instance_by_name(launch.name)
+                if instance is None:
+                    return None
+                instance_id = str(instance.uuid)
+        return self.api_client.get_instance(instance_id)
 
     def get_volume_mounts_to_sync(self, provisioning_data: JobProvisioningData) -> list[str]:
         instance = self.api_client.get_instance(provisioning_data.instance_id)
@@ -233,7 +266,8 @@ class MassedComputeCompute(
                     backend=BackendType.MASSEDCOMPUTE,
                     owner_type=OwnerType.INSTANCE,
                     provider_ref=provider_ref,
-                    primary_id=instance.uuid,
+                    primary_id=str(instance.uuid),
+                    primary_name=instance.name,
                     region="any",
                     created_at=instance.created,
                     description=instance.name,
@@ -245,6 +279,12 @@ class MassedComputeCompute(
     def delete_resource_group(self, group: ListedResourceGroup) -> None:
         if group.primary_id is not None:
             self.terminate_instance(group.primary_id, "any")
+
+
+class _MassedComputeLaunch(CoreModel):
+    """Kept until the new VM is visible on the provider's UUID detail endpoint."""
+
+    name: str
 
 
 def _volume_provisioning_data(volume: MassedComputeVolume) -> VolumeProvisioningData:

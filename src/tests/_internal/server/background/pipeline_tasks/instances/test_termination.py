@@ -116,7 +116,13 @@ class TestTermination:
         assert instance.finished_at is not None
 
     @pytest.mark.parametrize(
-        "error", [BackendError("err"), RuntimeError("err"), NotYetTerminated("")]
+        "error",
+        [
+            BackendError("err"),
+            RuntimeError("err"),
+            NotYetTerminated(""),
+            NotYetTerminated("Found VM", instance_id="confirmed-id", backend_data='{"vm": 1}'),
+        ],
     )
     async def test_terminate_retry(
         self,
@@ -151,7 +157,12 @@ class TestTermination:
             self.mock_terminate_in_backend(error=None) as mock,
         ):
             await process_instance(session, worker, instance)
-            mock.assert_called_once()
+            if isinstance(error, NotYetTerminated) and error.instance_id:
+                mock.assert_called_once_with(
+                    error.instance_id, instance.region, error.backend_data
+                )
+            else:
+                mock.assert_called_once()
         await session.refresh(instance)
         assert instance.status == InstanceStatus.TERMINATED
 

@@ -8,24 +8,25 @@ from dstack._internal.core.errors import ComputeError, VolumeDeletionPending
 
 
 class TestLaunch:
-    @pytest.mark.parametrize("visible", [True, False])
-    def test_lost_response(self, requests_mock, visible):
-        name = "dstack-main-gpu-abcdefgh12345678"
-        vm_id = "465e97cc-77cc-47dd-bb7c-1835ee127f9f"
-        other = {"name": "other", "uuid": "other-id", "status": "Running"}
-        instances = [other]
-        if visible:
-            instances.append({"name": name, "uuid": vm_id, "status": "Initializing"})
-        launch = requests_mock.post(f"{API_URL}/instance/launch", exc=requests.ReadTimeout)
-        requests_mock.get(f"{API_URL}/instance", json={"runningInstances": instances})
-        client = MassedComputeAPIClient("test-key")
-
-        if visible:
-            assert client.launch(name, "gpu_1x_pro_6000_blackwell", "true") == vm_id
-        else:
-            with pytest.raises(ComputeError, match="ReadTimeout"):
-                client.launch(name, "gpu_1x_pro_6000_blackwell", "true")
+    @pytest.mark.parametrize(
+        "response",
+        [
+            {"exc": requests.ReadTimeout},
+            {"status_code": 408},
+            {"status_code": 502},
+            {"status_code": 202, "json": {"response": "invalid"}},
+        ],
+    )
+    def test_unconfirmed_launch(self, requests_mock, response):
+        launch = requests_mock.post(f"{API_URL}/instance/launch", **response)
+        assert MassedComputeAPIClient("test").launch("worker", "product", "true") is None
         assert launch.call_count == 1
+
+    @pytest.mark.parametrize("response", [{"status_code": 409}, {"exc": requests.ConnectTimeout}])
+    def test_rejected_or_unsent_launch(self, requests_mock, response):
+        requests_mock.post(f"{API_URL}/instance/launch", **response)
+        with pytest.raises(ComputeError):
+            MassedComputeAPIClient("test").launch("worker", "product", "true")
 
 
 class TestDeleteVolume:

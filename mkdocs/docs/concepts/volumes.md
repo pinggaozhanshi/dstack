@@ -74,7 +74,7 @@ If you use this configuration, `dstack` will create a new volume based on the sp
     name: my-volume
     ```
 
-    > Deleting a VM before uploads finish can lose recent changes. See [storage limitations](https://vm-docs.massedcompute.com/docs/persistent-storage/limitations).
+    > If a VM loses its connection to storage, deleting it can lose recent writes. See [storage limitations](https://vm-docs.massedcompute.com/docs/persistent-storage/limitations).
 
 ??? info "Kubernetes"
     Set `region` to a kubeconfig context name enabled in the [backend configuration](backends.md#kubernetes).

@@ -1106,9 +1106,8 @@ projects:
 
 </div>
 
-MassedCompute provisions single-node, on-demand CPU and GPU VMs. Offers use the region `any`
-because MassedCompute selects the site at launch. Instance volumes persist for the lifetime
-of the VM. Experimental [network volumes](volumes.md#network-volumes) persist across VMs.
+MassedCompute provisions single-node, on-demand CPU and GPU VMs and selects the site at launch
+(region `any`). It also supports experimental [network volumes](volumes.md#network-volumes).
 
 ### Vultr
 
