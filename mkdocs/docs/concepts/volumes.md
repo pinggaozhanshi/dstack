@@ -64,8 +64,8 @@ If you use this configuration, `dstack` will create a new volume based on the sp
 
     > Files on Lium volumes are owned by root and accessible to all users in the container.
 
-??? info "MassedCompute (experimental)"
-    Enable Persistent Storage in your MassedCompute account and omit `size` and `region`.
+??? info "MassedCompute"
+    Network volumes are experimental. Enable Persistent Storage in your MassedCompute account and omit `size` and `region`.
     A VM can attach up to eight volumes at launch. Delete the VM before using a volume on another VM.
 
     ```yaml

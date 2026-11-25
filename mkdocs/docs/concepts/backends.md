@@ -1092,6 +1092,8 @@ projects:
 Create a full-access API key in [MassedCompute settings](https://vm-docs.massedcompute.com/docs/settings/api-settings)
 and configure the backend in the server configuration.
 
+<div editor-title="~/.dstack/server/config.yml">
+
 ```yaml
 projects:
   - name: main
@@ -1101,6 +1103,8 @@ projects:
           type: api_key
           api_key: YOUR_MASSEDCOMPUTE_API_KEY
 ```
+
+</div>
 
 MassedCompute provisions single-node, on-demand CPU and GPU VMs. Offers use the region `any`
 because MassedCompute selects the site at launch. Instance volumes persist for the lifetime
