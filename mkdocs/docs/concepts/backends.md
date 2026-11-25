@@ -1102,9 +1102,9 @@ projects:
           api_key: YOUR_MASSEDCOMPUTE_API_KEY
 ```
 
-MassedCompute provisions single-node, on-demand VMs and selects the site automatically. It supports experimental [network volumes](volumes.md#network-volumes).
-Offers use the region `any`. Storage support is limited to instance volumes, which
-retain files across jobs on the same VM until the VM is deleted.
+MassedCompute provisions single-node, on-demand CPU and GPU VMs. Offers use the region `any`
+because MassedCompute selects the site at launch. Instance volumes persist for the lifetime
+of the VM. Experimental [network volumes](volumes.md#network-volumes) persist across VMs.
 
 ### Vultr
 
