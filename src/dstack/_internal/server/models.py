@@ -1156,6 +1156,15 @@ class VolumeAttachmentModel(BaseModel):
     )
     """Backend and provider volume ID for an exclusive launch-time attachment, including external aliases."""
 
+    __table_args__ = (
+        Index(
+            "ix_volumes_attachments_exclusive_instance_id",
+            instance_id,
+            postgresql_where=exclusive_volume_id.is_not(None),
+            sqlite_where=exclusive_volume_id.is_not(None),
+        ),
+    )
+
 
 class PlacementGroupModel(PipelineModelMixin, BaseModel):
     __tablename__ = "placement_groups"

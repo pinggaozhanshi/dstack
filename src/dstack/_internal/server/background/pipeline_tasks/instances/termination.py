@@ -28,7 +28,9 @@ from dstack._internal.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-async def terminate_instance(instance_model: InstanceModel) -> ProcessResult:
+async def terminate_instance(
+    instance_model: InstanceModel, has_exclusive_volumes: bool
+) -> ProcessResult:
     result = ProcessResult()
     now = get_current_datetime()
     if (
@@ -38,9 +40,6 @@ async def terminate_instance(instance_model: InstanceModel) -> ProcessResult:
         return result
 
     job_provisioning_data = get_instance_provisioning_data(instance_model)
-    has_exclusive_volumes = any(
-        a.exclusive_volume_id is not None for a in instance_model.volume_attachments
-    )
     if job_provisioning_data is not None and job_provisioning_data.backend != BackendType.REMOTE:
         try:
             await _terminate_in_backend(
