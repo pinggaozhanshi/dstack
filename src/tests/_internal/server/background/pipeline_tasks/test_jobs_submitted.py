@@ -52,6 +52,7 @@ from dstack._internal.server.background.pipeline_tasks.jobs_submitted import (
     JobSubmittedWorker,
     _get_new_capacity_failure_message,
     _load_submitted_job_context,
+    _lock_related_volume_models,
     _NewCapacityAttempts,
     _OfferAttemptError,
     _release_replica_jobs_from_master_wait,
@@ -3024,6 +3025,82 @@ class TestJobSubmittedWorker:
         assert volume.lock_token is None
         assert volume.lock_expires_at is None
         backend_mock.compute.return_value.attach_volume.assert_called_once()
+
+    async def test_releases_expired_candidate_volume_locks_before_retrying_a_launch(
+        self,
+        test_db,
+        session: AsyncSession,
+        fetcher: JobSubmittedFetcher,
+        worker: JobSubmittedWorker,
+    ):
+        project = await create_project(session)
+        user = await create_user(session)
+        repo = await create_repo(session, project_id=project.id)
+        spec = get_fleet_spec()
+        spec.configuration.nodes = FleetNodesSpec(min=0, target=0, max=1)
+        await create_fleet(session, project, spec=spec)
+        data = get_volume_provisioning_data(backend=BackendType.MASSEDCOMPUTE)
+        data.exclusive_at_launch = True
+        volume = await create_volume(
+            session,
+            project,
+            user,
+            status=VolumeStatus.ACTIVE,
+            configuration=MassedComputeVolumeConfiguration(name="checkpoints"),
+            volume_provisioning_data=data,
+        )
+        alternative = await create_volume(
+            session,
+            project,
+            user,
+            status=VolumeStatus.ACTIVE,
+            volume_provisioning_data=get_volume_provisioning_data(backend=BackendType.AWS),
+        )
+        run_spec = get_run_spec(repo_id=repo.name)
+        run_spec.configuration.volumes = [
+            VolumeMountPoint(name=[volume.name, alternative.name], path="/checkpoints")
+        ]
+        run = await create_run(session, project, repo, user, run_spec=run_spec)
+        job = await create_job(session, run)
+        backend = Mock()
+        backend.TYPE = BackendType.MASSEDCOMPUTE
+        compute = backend.compute.return_value
+        compute.get_offers.return_value = [
+            get_instance_offer_with_availability(backend=backend.TYPE, region="any")
+        ]
+        compute.run_job.side_effect = BackendError("no capacity")
+        with patch(
+            "dstack._internal.server.services.backends.cache.lease_project_backends",
+            mock_lease([backend]),
+        ):
+            await _process_job(session, worker, job)
+            await session.refresh(job)
+            # A lost worker committed related locks but never applied the provisioning result.
+            _lock_job_expired_same_owner(job)
+            job.last_processed_at = get_or_error(job.lock_expires_at)
+            previous_item = _job_to_pipeline_item(job)
+            for candidate in (volume, alternative):
+                candidate.lock_owner = f"{JobSubmittedPipeline.__name__}:{job.id}"
+                candidate.lock_token = job.lock_token
+                candidate.lock_expires_at = job.lock_expires_at
+            await session.commit()
+            (item,) = await fetcher.fetch(limit=1)
+            assert item.prev_lock_expired
+            for candidate in (volume, alternative):
+                await session.refresh(candidate)
+                assert candidate.lock_owner is None
+                assert candidate.lock_token is None
+                assert candidate.lock_expires_at is None
+            # A delayed response from the previous launch must not recreate the cleared leases.
+            assert (
+                await _lock_related_volume_models(previous_item, [[volume.id, alternative.id]])
+                is None
+            )
+            await worker.process(item)
+
+        compute.run_job.assert_called_once()
+        await session.refresh(job)
+        assert job.status == JobStatus.TERMINATING
 
     async def test_run_job_uses_server_default_registry(
         self,

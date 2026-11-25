@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional, Sequence, Union
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, contains_eager, joinedload, load_only, selectinload
@@ -285,6 +285,23 @@ class JobSubmittedFetcher(Fetcher[JobSubmittedPipelineItem]):
                     )
                 )
                 job_models = list(res.scalars().all())
+                # A worker can die after locking volume candidates but before applying its result.
+                # Release its related leases in the same transaction that replaces its job token.
+                expired_volume_leases = [
+                    (_get_related_volume_lock_owner(job_model.id), job_model.lock_token)
+                    for job_model in job_models
+                    if job_model.lock_expires_at is not None and job_model.lock_token is not None
+                ]
+                if expired_volume_leases:
+                    await session.execute(
+                        update(VolumeModel)
+                        .where(
+                            tuple_(VolumeModel.lock_owner, VolumeModel.lock_token).in_(
+                                expired_volume_leases
+                            )
+                        )
+                        .values(lock_expires_at=None, lock_owner=None, lock_token=None)
+                    )
                 lock_expires_at = get_current_datetime() + self._lock_timeout
                 lock_token = uuid.uuid4()
                 items = []
@@ -2015,9 +2032,19 @@ async def _lock_related_volume_models(
         return []
 
     related_volume_lock_owner = _get_related_volume_lock_owner(item.id)
-    volume_lock, _ = get_locker(get_db().dialect_name).get_lockset(VolumeModel.__tablename__)
-    async with volume_lock:
+    locker = get_locker(get_db().dialect_name)
+    job_lock, _ = locker.get_lockset(JobModel.__tablename__)
+    volume_lock, _ = locker.get_lockset(VolumeModel.__tablename__)
+    async with job_lock, volume_lock:
         async with get_session_ctx() as session:
+            # A provider call may have returned to a worker whose job was already reclaimed.
+            job_id = await session.scalar(
+                select(JobModel.id)
+                .where(JobModel.id == item.id, JobModel.lock_token == item.lock_token)
+                .with_for_update(key_share=True)
+            )
+            if job_id is None:
+                return None
             # Persist related volume locks before attach because the attach call itself
             # must run outside a DB transaction in the processing phase.
             res = await session.execute(
@@ -2790,12 +2817,16 @@ async def _reserve_launch_volumes(job: JobModel, volumes: list[Volume]) -> None:
     selected = {v.id: v for v in volumes if v.exclusive_at_launch}
     ids = sorted(selected)
     locker = get_locker(get_db().dialect_name)
-    async with locker.lock_ctx(VolumeModel.__tablename__, ids), get_session_ctx() as session:
+    job_lock, _ = locker.get_lockset(JobModel.__tablename__)
+    volume_lock, locked_ids = locker.get_lockset(VolumeModel.__tablename__)
+    async with job_lock, volume_lock, get_session_ctx() as session:
+        if any(volume_id in locked_ids for volume_id in ids):
+            raise SkipOffer("A requested volume is being processed")
         # A worker whose lease was lost must not replace the successor's reservations.
         owner = await session.scalar(
             select(JobModel.instance_id)
             .where(JobModel.id == job.id, JobModel.lock_token == job.lock_token)
-            .with_for_update()
+            .with_for_update(key_share=True)
         )
         if owner is None or owner != job.instance_id:
             raise SkipOffer("The job no longer owns the instance for volume attachment")
@@ -2809,7 +2840,7 @@ async def _reserve_launch_volumes(job: JobModel, volumes: list[Volume]) -> None:
                 VolumeModel.lock_expires_at.is_(None),
             )
             .order_by(VolumeModel.id)
-            .with_for_update()
+            .with_for_update(key_share=True)
         )
         if set(available) != set(ids):
             raise SkipOffer("A requested volume is no longer available")
@@ -2825,14 +2856,17 @@ async def _reserve_launch_volumes(job: JobModel, volumes: list[Volume]) -> None:
             else:
                 await session.delete(attachment)
         await session.flush()
-        for volume in selected.values():
-            session.add(
-                VolumeAttachmentModel(
-                    instance_id=owner,
-                    volume_id=volume.id,
-                    exclusive_volume_id=f"{volume.get_backend().value}/{get_or_error(volume.volume_id)}",
-                )
+        reservations = [
+            VolumeAttachmentModel(
+                instance_id=owner,
+                volume_id=volume.id,
+                exclusive_volume_id=f"{volume.get_backend().value}/{get_or_error(volume.volume_id)}",
             )
+            for volume in selected.values()
+        ]
+        # Aliases have different local IDs. Acquire the unique provider keys in the same order.
+        reservations.sort(key=lambda a: get_or_error(a.exclusive_volume_id))
+        session.add_all(reservations)
         try:
             await session.commit()
         except IntegrityError as e:
