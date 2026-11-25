@@ -82,7 +82,7 @@ func bindMountedVolume(source, target string) error {
 	if err != nil {
 		return err
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	var dir, parent unix.Statx_t
 	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH, unix.STATX_MNT_ID, &dir); err != nil {
 		return err
