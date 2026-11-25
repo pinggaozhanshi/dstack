@@ -1,9 +1,10 @@
-from typing import Optional, TypedDict, TypeVar, Union
+from typing import Optional, TypeVar, Union
 from urllib.parse import quote
 from uuid import UUID
 
 import requests
 from pydantic import AwareDatetime, Field, ValidationError
+from typing_extensions import TypedDict
 
 from dstack._internal.core.errors import BackendAuthError, ComputeError
 from dstack._internal.core.models.common import CoreModel, validate_json_extra_ignore
@@ -30,7 +31,7 @@ class _LaunchResponse(CoreModel):
     response: UUID
 
 
-class _LaunchRequest(TypedDict):
+class _LaunchRequest(TypedDict, closed=True):
     instanceName: str
     productName: str
     imageId: int
@@ -39,7 +40,7 @@ class _LaunchRequest(TypedDict):
     sshKeys: list[str]
 
 
-class _TerminateRequest(TypedDict):
+class _TerminateRequest(TypedDict, closed=True):
     instanceUuids: list[str]
 
 
