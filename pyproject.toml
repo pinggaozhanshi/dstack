@@ -32,7 +32,8 @@ dependencies = [
     "python-multipart>=0.0.31",
     "filelock",
     "psutil",
-    "gpuhunt==0.1.35",
+    # Replace with the gpuhunt release containing the MassedCompute provider before merging.
+    "gpuhunt @ git+https://github.com/dstackai/gpuhunt.git@c711dfbff2a06d4136aa239813ab8184dfebb7a9",
     "argcomplete>=3.5.0",
     "ignore-python>=0.2.0",
     "apscheduler<4",
@@ -55,6 +56,10 @@ dstack = "dstack._internal.cli.main:main"
 
 [tool.hatch.version]
 path = "src/dstack/version.py"
+
+[tool.hatch.metadata]
+# Remove after pinning the released gpuhunt package.
+allow-direct-references = true
 
 [tool.hatch.build.targets.sdist]
 artifacts = [
