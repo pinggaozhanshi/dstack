@@ -65,26 +65,16 @@ If you use this configuration, `dstack` will create a new volume based on the sp
     > Files on Lium volumes are owned by root and accessible to all users in the container.
 
 ??? info "MassedCompute (experimental)"
-    Enable Persistent Storage in your MassedCompute account. Storage grows with usage.
-    Omit `size` and `region`. To register existing storage, set `volume_id` to its MassedCompute ID.
+    Enable Persistent Storage in your MassedCompute account and omit `size` and `region`.
+    A VM can attach up to eight volumes at launch. Delete the VM before using a volume on another VM.
 
     ```yaml
     type: volume
     backend: massedcompute
-    name: checkpoints
+    name: my-volume
     ```
 
-    Each VM can attach up to eight volumes at launch. A volume stays attached until that VM
-    is deleted. Jobs can reuse a VM that already has the requested volumes.
-    Use each volume with one VM at a time, including workloads outside dstack.
-
-    On graceful shutdown, dstack flushes the mounts before deleting the VM. If the flush fails,
-    dstack keeps the VM and retries. A retained VM continues to incur compute charges.
-
-    The provider uploads writes in the background. If the VM loses its connection to storage,
-    the provider's flush can report success while uploads are pending. Terminating the VM
-    then can lose recent writes or deletions. Symlinks can reappear as empty files after
-    remount. [Persistent Storage limitations](https://vm-docs.massedcompute.com/docs/persistent-storage/limitations)
+    > Deleting a VM before uploads finish can lose recent changes. See [storage limitations](https://vm-docs.massedcompute.com/docs/persistent-storage/limitations).
 
 ??? info "Kubernetes"
     Set `region` to a kubeconfig context name enabled in the [backend configuration](backends.md#kubernetes).
@@ -250,7 +240,7 @@ and its contents will persist across runs.
 
 ### Detach a volume { #detach-network-volume }
 
-`dstack` automatically detaches volumes from instances when a run stops.
+`dstack` automatically detaches volumes when a run stops if the backend supports detaching them.
 
 !!! info "Force detach"
     In some clouds such as AWS a volume may stuck in the detaching state.
