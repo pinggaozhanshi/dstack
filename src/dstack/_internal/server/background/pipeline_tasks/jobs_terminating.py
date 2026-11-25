@@ -435,7 +435,11 @@ async def _load_job_volume_models(
     volume_names = (
         jrd.volume_names
         if jrd and jrd.volume_names
-        else [va.volume.name for va in instance_model.volume_attachments]
+        else [
+            va.volume.name
+            for va in instance_model.volume_attachments
+            if va.exclusive_volume_id is None or jrd is None or jrd.volume_names is None
+        ]
     )
     if len(volume_names) == 0:
         return []
@@ -535,6 +539,19 @@ async def _apply_process_result(
             await skip_gateway_replicas_min_processing_interval(session, job_model.run.gateway_id)
 
         if instance_model is not None and result.delete_instance:
+            # Release a failed launch's reservations before removing its placeholder.
+            await session.execute(
+                delete(VolumeAttachmentModel).where(
+                    VolumeAttachmentModel.exclusive_volume_id.is_not(None),
+                    VolumeAttachmentModel.instance_id.in_(
+                        select(InstanceModel.id).where(
+                            InstanceModel.id == instance_model.id,
+                            InstanceModel.lock_token == item.lock_token,
+                            InstanceModel.lock_owner == related_instance_lock_owner,
+                        )
+                    ),
+                )
+            )
             res = await session.execute(
                 delete(InstanceModel)
                 .where(
@@ -1069,6 +1086,12 @@ async def _detach_volumes_from_job_instance(
         detached_volume_ids = set()
         all_detached = True
         for volume_model in volume_models:
+            if any(
+                a.instance_id == instance_model.id and a.exclusive_volume_id is not None
+                for a in volume_model.attachments
+            ):
+                # This attachment lasts until VM termination, independently of the job.
+                continue
             detached = await _detach_volume_from_job_instance(
                 backend=backend,
                 job_model=job_model,

@@ -4,7 +4,7 @@ import pytest
 import requests
 
 from dstack._internal.core.backends.massedcompute.api_client import API_URL, MassedComputeAPIClient
-from dstack._internal.core.errors import ComputeError
+from dstack._internal.core.errors import ComputeError, VolumeDeletionPending
 
 
 class TestLaunch:
@@ -26,6 +26,25 @@ class TestLaunch:
             with pytest.raises(ComputeError, match="ReadTimeout"):
                 client.launch(name, "gpu_1x_pro_6000_blackwell", "true")
         assert launch.call_count == 1
+
+
+class TestDeleteVolume:
+    def test_retries_until_provider_confirms_deletion(self, requests_mock):
+        requests_mock.delete(
+            f"{API_URL}/storage-volumes/vol-id",
+            [
+                {"status_code": 409},
+                {"status_code": 202, "json": {"result": {"deleted": False}}},
+                {"status_code": 200, "json": {"result": {"deleted": True}}},
+                {"status_code": 404},
+            ],
+        )
+        client = MassedComputeAPIClient("test")
+        for _ in range(2):
+            with pytest.raises(VolumeDeletionPending):
+                client.delete_volume("vol-id")
+        client.delete_volume("vol-id")
+        client.delete_volume("vol-id")
 
 
 class TestGetInstance:

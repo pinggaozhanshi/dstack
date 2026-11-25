@@ -1,13 +1,14 @@
 import datetime as dt
 from contextlib import contextmanager
 from typing import Optional
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import time_machine
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dstack._internal.core.errors import BackendError, NotYetTerminated
+from dstack._internal.core.errors import BackendError, NotYetTerminated, SSHError
 from dstack._internal.core.models.backends.base import BackendType
 from dstack._internal.core.models.backends.orphans import OrphanCleanupMode
 from dstack._internal.core.models.instances import InstanceStatus, InstanceTerminationReason
@@ -16,10 +17,13 @@ from dstack._internal.server.background.pipeline_tasks.instances import Instance
 from dstack._internal.server.background.pipeline_tasks.instances import (
     termination as instances_termination,
 )
-from dstack._internal.server.models import InstanceModel
+from dstack._internal.server.models import InstanceModel, VolumeAttachmentModel
 from dstack._internal.server.testing.common import (
+    ComputeMockSpec,
     create_instance,
     create_project,
+    create_user,
+    create_volume,
     get_job_provisioning_data,
     list_events,
     mock_lease,
@@ -225,6 +229,62 @@ class TestTermination:
             mock.assert_called_once()
         await session.refresh(instance)
         assert instance.status == InstanceStatus.TERMINATED
+
+    async def test_retains_exclusive_volume_until_vm_is_gone(
+        self, test_db, session: AsyncSession, worker: InstanceWorker
+    ):
+        project = await create_project(session)
+        user = await create_user(session)
+        volume = await create_volume(session, project, user)
+        jpd = get_job_provisioning_data(backend=BackendType.MASSEDCOMPUTE)
+        jpd.volume_mounts = {"id": "/persistent/checkpoints"}
+        instance = await create_instance(
+            session,
+            project,
+            status=InstanceStatus.TERMINATING,
+            volumes=[volume],
+            job_provisioning_data=jpd,
+        )
+        instance.volume_attachments[0].exclusive_volume_id = "massedcompute/id"
+        now = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+        instance.first_termination_retry_at = now - dt.timedelta(minutes=16)
+        instance.last_termination_retry_at = instance.first_termination_retry_at
+        instance.termination_reason = InstanceTerminationReason.IDLE_TIMEOUT
+        await session.commit()
+
+        compute = Mock(spec=ComputeMockSpec)
+        compute.get_volume_mounts_to_sync.side_effect = [["/persistent/checkpoints"], []]
+        backend = Mock()
+        backend.compute.return_value = compute
+        conn = AsyncMock()
+        conn.sync_volume_mounts.side_effect = SSHError("flush failed")
+        with (
+            patch(
+                "dstack._internal.server.services.backends.cache.lease_project_backend_by_type",
+                mock_lease(backend),
+            ),
+            patch.object(
+                instances_termination.instance_connection_pool, "get_or_open", return_value=conn
+            ),
+        ):
+            with time_machine.travel(now, tick=False):
+                await process_instance(session, worker, instance)
+            compute.terminate_instance.assert_not_called()
+            await session.refresh(instance)
+            assert instance.status == InstanceStatus.TERMINATING
+            attachment = select(VolumeAttachmentModel.volume_id).where(
+                VolumeAttachmentModel.instance_id == instance.id
+            )
+            assert await session.scalar(attachment) == volume.id
+            assert any(
+                "Volume attachments retained" in e.message for e in await list_events(session)
+            )
+            with time_machine.travel(now + dt.timedelta(minutes=1), tick=False):
+                await process_instance(session, worker, instance)
+            compute.terminate_instance.assert_called_once()
+            assert await session.scalar(attachment) is None
+            await session.refresh(instance)
+            assert instance.status == InstanceStatus.TERMINATED
 
     async def test_emits_event_if_all_termination_attempts_failed(
         self,

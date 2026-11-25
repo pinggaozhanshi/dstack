@@ -1,4 +1,5 @@
 import os
+import shlex
 import shutil
 import threading
 import time
@@ -237,6 +238,14 @@ class InstanceConnection:
             self._real_control_socket_path.unlink(missing_ok=True)
         self._tunnel.open()
         self._last_verified_at = time.monotonic()
+
+    async def sync_volume_mounts(self, paths: Collection[str]) -> None:
+        """Wait for each host mount to flush before releasing its VM."""
+        commands = [
+            f"mountpoint -q -- {shlex.quote(path)} && sync -- {shlex.quote(path)}"
+            for path in paths
+        ]
+        await self._tunnel.aexec(" && ".join(commands), timeout=60)
 
     def is_alive(self) -> bool:
         """

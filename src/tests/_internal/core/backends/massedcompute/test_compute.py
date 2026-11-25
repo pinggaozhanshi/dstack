@@ -8,8 +8,54 @@ from dstack._internal.core.backends.massedcompute.models import (
     MassedComputeConfig,
     MassedComputeCreds,
 )
-from dstack._internal.core.errors import NotYetTerminated
+from dstack._internal.core.errors import NotYetTerminated, ProvisioningError
 from dstack._internal.core.models.backends.orphans import OwnerType
+from dstack._internal.server.testing.common import get_job_provisioning_data
+
+
+class TestUpdateProvisioningData:
+    @pytest.mark.parametrize(("attached", "hidden_count"), [(False, 0), (True, 1), (True, 0)])
+    def test_requires_exclusive_attachment_before_exposing_ssh(
+        self, requests_mock, attached, hidden_count
+    ):
+        compute = MassedComputeCompute(
+            MassedComputeConfig(creds=MassedComputeCreds(api_key="test"))
+        )
+        jpd = get_job_provisioning_data(hostname=None)
+        volume_id = "78ee0ea9-4c18-4aa4-b0df-aa1212734d45"
+        jpd.volume_mounts = {volume_id: "/persistent/checkpoints"}
+        vm = {
+            "uuid": jpd.instance_id,
+            "name": "worker",
+            "status": "Running",
+            "os_booted": True,
+            "username": "Ubuntu",
+            "ip": "192.0.2.1",
+        }
+        requests_mock.get(f"{API_URL}/instance/{jpd.instance_id}", json={"runningInstances": [vm]})
+        requests_mock.get(
+            f"{API_URL}/storage-volumes",
+            json={
+                "storageVolumes": [
+                    {
+                        "id": volume_id,
+                        "name": "checkpoints",
+                        "status": "active",
+                        "canManage": True,
+                        "mountPath": "/persistent/checkpoints",
+                        "hiddenAttachedCount": hidden_count,
+                        "attachedTo": [{"uuid": jpd.instance_id}] if attached else [],
+                    }
+                ]
+            },
+        )
+        if attached and hidden_count == 0:
+            compute.update_provisioning_data(jpd, "", "")
+            assert jpd.hostname == "192.0.2.1"
+        else:
+            with pytest.raises(ProvisioningError, match="failed to attach"):
+                compute.update_provisioning_data(jpd, "", "")
+            assert jpd.hostname is None
 
 
 class TestTerminateInstance:

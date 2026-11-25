@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import Optional, Sequence, Union
 
 from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, contains_eager, joinedload, load_only, selectinload
 
@@ -52,7 +53,7 @@ from dstack._internal.core.models.runs import (
     Requirements,
     Run,
 )
-from dstack._internal.core.models.volumes import Volume
+from dstack._internal.core.models.volumes import Volume, VolumeStatus
 from dstack._internal.core.services.profiles import get_termination
 from dstack._internal.server import settings
 from dstack._internal.server.background.pipeline_tasks.base import (
@@ -414,7 +415,8 @@ class _TerminateSubmittedJobResult:
 @dataclass
 class _VolumeAttachmentPayload:
     volume_id: uuid.UUID
-    attachment_data: str
+    attachment_data: Optional[str]
+    """None when the attachment was already recorded at launch."""
     volume_name: str
 
 
@@ -1940,6 +1942,16 @@ async def _process_volume_attachments(
                         and volume_model.lock_owner != related_volume_lock_owner
                     ):
                         raise ServerClientError("Cannot attach a volume locked for processing")
+                    if volume.exclusive_at_launch:
+                        if any(
+                            a.instance_id == job_model.instance_id
+                            for a in volume_model.attachments
+                        ):
+                            attachments.append(
+                                _VolumeAttachmentPayload(volume.id, None, volume.name)
+                            )
+                            break
+                        continue
                     if (
                         job_provisioning_data.get_base_backend() != volume.get_backend()
                         or job_provisioning_data.region.lower() != volume.get_region().lower()
@@ -2134,6 +2146,8 @@ async def _apply_volume_attachment_result(
             .values(last_job_processed_at=now)
         )
         for attachment in volume_attachment_result.attachments:
+            if attachment.attachment_data is None:
+                continue
             session.add(
                 VolumeAttachmentModel(
                     volume_id=attachment.volume_id,
@@ -2441,6 +2455,7 @@ async def _provision_new_capacity(
         fleet_model=fleet_model,
     )
     multinode = requirements.multinode or is_multinode_job(job)
+    has_exclusive_volumes = any(v.exclusive_at_launch for vs in volumes for v in vs)
     # New instances belong to the fleet's project, which differs from
     # the job's project if the fleet is imported.
     fleet_project = fleet_model.project
@@ -2527,6 +2542,10 @@ async def _provision_new_capacity(
                 use_group_provisioning = (
                     offer.backend in BACKENDS_WITH_GROUP_PROVISIONING_SUPPORT and len(jobs) > 1
                 )
+                if has_exclusive_volumes and job_model.instance_id is not None:
+                    await _reserve_launch_volumes(job_model, offer_volumes)
+                elif any(v.exclusive_at_launch for v in offer_volumes):
+                    raise SkipOffer("An exclusive volume requires an instance to reserve it")
                 if use_group_provisioning:
                     assert isinstance(compute, ComputeWithGroupProvisioningSupport)
                     compute_group_provisioning_data = await run_async(
@@ -2760,6 +2779,64 @@ def _get_effective_profile_and_requirements(
         return None
     # TODO: Respect fleet provisioning properties such as tags.
     return effective_profile, requirements
+
+
+async def _reserve_launch_volumes(job: JobModel, volumes: list[Volume]) -> None:
+    """Reserve exclusive volumes on the job's placeholder before calling the cloud.
+
+    Retrying the same placement keeps its attachments. Trying another offer replaces them
+    atomically. The unique provider ID also excludes concurrent launches through an alias.
+    """
+    selected = {v.id: v for v in volumes if v.exclusive_at_launch}
+    ids = sorted(selected)
+    locker = get_locker(get_db().dialect_name)
+    async with locker.lock_ctx(VolumeModel.__tablename__, ids), get_session_ctx() as session:
+        # A worker whose lease was lost must not replace the successor's reservations.
+        owner = await session.scalar(
+            select(JobModel.instance_id)
+            .where(JobModel.id == job.id, JobModel.lock_token == job.lock_token)
+            .with_for_update()
+        )
+        if owner is None or owner != job.instance_id:
+            raise SkipOffer("The job no longer owns the instance for volume attachment")
+        available = await session.scalars(
+            select(VolumeModel.id)
+            .where(
+                VolumeModel.id.in_(ids),
+                VolumeModel.status == VolumeStatus.ACTIVE,
+                VolumeModel.deleted.is_(False),
+                VolumeModel.to_be_deleted.is_(False),
+                VolumeModel.lock_expires_at.is_(None),
+            )
+            .order_by(VolumeModel.id)
+            .with_for_update()
+        )
+        if set(available) != set(ids):
+            raise SkipOffer("A requested volume is no longer available")
+        owned = await session.scalars(
+            select(VolumeAttachmentModel).where(
+                VolumeAttachmentModel.instance_id == owner,
+                VolumeAttachmentModel.exclusive_volume_id.is_not(None),
+            )
+        )
+        for attachment in owned:
+            if attachment.volume_id in selected:
+                del selected[attachment.volume_id]
+            else:
+                await session.delete(attachment)
+        await session.flush()
+        for volume in selected.values():
+            session.add(
+                VolumeAttachmentModel(
+                    instance_id=owner,
+                    volume_id=volume.id,
+                    exclusive_volume_id=f"{volume.get_backend().value}/{get_or_error(volume.volume_id)}",
+                )
+            )
+        try:
+            await session.commit()
+        except IntegrityError as e:
+            raise SkipOffer("A requested volume is already reserved by another instance") from e
 
 
 def _get_offer_volumes(

@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from dstack._internal.core.errors import BackendError
+from dstack._internal.core.errors import BackendError, SkipOffer
 from dstack._internal.core.models.backends.base import BackendType
 from dstack._internal.core.models.common import (
     EntityReference,
@@ -39,6 +39,7 @@ from dstack._internal.core.models.resources import CPUSpec, Memory, Range, Resou
 from dstack._internal.core.models.runs import JobRuntimeData, JobStatus, JobTerminationReason
 from dstack._internal.core.models.users import GlobalRole
 from dstack._internal.core.models.volumes import (
+    MassedComputeVolumeConfiguration,
     VolumeAttachmentData,
     VolumeMountPoint,
     VolumeStatus,
@@ -54,6 +55,7 @@ from dstack._internal.server.background.pipeline_tasks.jobs_submitted import (
     _NewCapacityAttempts,
     _OfferAttemptError,
     _release_replica_jobs_from_master_wait,
+    _reserve_launch_volumes,
 )
 from dstack._internal.server.models import (
     ComputeGroupModel,
@@ -87,6 +89,7 @@ from dstack._internal.server.testing.common import (
     get_remote_connection_info,
     get_run_spec,
     get_ssh_fleet_configuration,
+    get_volume,
     get_volume_provisioning_data,
     mock_lease,
 )
@@ -109,6 +112,49 @@ def fetcher() -> JobSubmittedFetcher:
 @pytest.fixture
 def worker() -> JobSubmittedWorker:
     return JobSubmittedWorker(queue=Mock(), heartbeater=Mock(), pipeline_hinter=Mock())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("test_db", ["sqlite", "postgres"], indirect=True)
+class TestReserveLaunchVolumes:
+    async def test_aliases_compete_for_one_attachment(self, test_db, session: AsyncSession):
+        project = await create_project(session=session)
+        user = await create_user(session=session)
+        repo = await create_repo(session=session, project_id=project.id)
+        vpd = get_volume_provisioning_data(backend=BackendType.MASSEDCOMPUTE)
+        vpd.exclusive_at_launch = True
+        jobs = []
+        volumes = []
+        for name in ("first", "second"):
+            config = MassedComputeVolumeConfiguration(name=name, volume_id=vpd.volume_id)
+            model = await create_volume(
+                session,
+                project,
+                user,
+                configuration=config,
+                status=VolumeStatus.ACTIVE,
+                volume_provisioning_data=vpd,
+            )
+            volumes.append(
+                get_volume(
+                    id_=model.id,
+                    configuration=config,
+                    volume_id=vpd.volume_id,
+                    provisioning_data=vpd,
+                )
+            )
+            run = await create_run(session, project, repo, user)
+            instance = await create_instance(session, project)
+            job = await create_job(session, run, instance=instance)
+            job.lock_token = uuid.uuid4()
+            await session.commit()
+            jobs.append(job)
+        await _reserve_launch_volumes(jobs[0], [volumes[0]])
+        await _reserve_launch_volumes(jobs[0], [volumes[0]])
+        with pytest.raises(SkipOffer, match="reserved"):
+            await _reserve_launch_volumes(jobs[1], [volumes[1]])
+        await _reserve_launch_volumes(jobs[0], [])
+        await _reserve_launch_volumes(jobs[1], [volumes[1]])
 
 
 def _lock_job_foreign(job_model: JobModel) -> None:

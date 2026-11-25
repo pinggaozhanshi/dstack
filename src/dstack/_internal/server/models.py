@@ -1151,6 +1151,10 @@ class VolumeAttachmentModel(BaseModel):
     instance_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("instances.id"), primary_key=True)
     instance: Mapped[InstanceModel] = relationship(back_populates="volume_attachments")
     attachment_data: Mapped[Optional[str]] = mapped_column(Text)
+    exclusive_volume_id: Mapped[Optional[str]] = mapped_column(
+        String(255), unique=True, index=True
+    )
+    """Backend and provider volume ID for an exclusive launch-time attachment, including external aliases."""
 
 
 class PlacementGroupModel(PipelineModelMixin, BaseModel):

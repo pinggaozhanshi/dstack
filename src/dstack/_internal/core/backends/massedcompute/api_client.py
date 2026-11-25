@@ -4,9 +4,9 @@ from uuid import UUID
 
 import requests
 from pydantic import AwareDatetime, Field, ValidationError
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
-from dstack._internal.core.errors import BackendAuthError, ComputeError
+from dstack._internal.core.errors import BackendAuthError, ComputeError, VolumeDeletionPending
 from dstack._internal.core.models.common import CoreModel, validate_json_extra_ignore
 
 API_URL = "https://vm.massedcompute.com/api/v1"
@@ -21,6 +21,43 @@ class MassedComputeInstance(CoreModel):
     username: Optional[str] = None
     os_booted: bool = False
     created: Optional[AwareDatetime] = None
+
+
+class _AttachedInstance(CoreModel):
+    uuid: str
+
+
+class _VolumeIdentity(CoreModel):
+    id: UUID
+    name: str
+
+
+class MassedComputeVolume(_VolumeIdentity):
+    status: str
+    mount_path: str = Field(alias="mountPath")
+    can_manage: bool = Field(alias="canManage")
+    attached_to: list[_AttachedInstance] = Field(alias="attachedTo")
+    hidden_attached_count: int = Field(alias="hiddenAttachedCount")
+
+
+class _Volumes(CoreModel):
+    volumes: list[MassedComputeVolume] = Field(alias="storageVolumes")
+
+
+class _CreatedVolume(CoreModel):
+    volume: _VolumeIdentity = Field(alias="storageVolume")
+
+
+class _VolumeDeletion(CoreModel):
+    deleted: bool
+
+
+class _DeletedVolume(CoreModel):
+    result: _VolumeDeletion
+
+
+class _CreateVolumeRequest(TypedDict, closed=True):
+    name: str
 
 
 class _Instances(CoreModel):
@@ -38,6 +75,7 @@ class _LaunchRequest(TypedDict, closed=True):
     regionName: str
     command: str
     sshKeys: list[str]
+    volumeIds: NotRequired[list[str]]
 
 
 class _TerminateRequest(TypedDict, closed=True):
@@ -55,7 +93,9 @@ class MassedComputeAPIClient:
             return False
         return True
 
-    def launch(self, name: str, product: str, command: str) -> str:
+    def launch(
+        self, name: str, product: str, command: str, volume_ids: Optional[list[str]] = None
+    ) -> str:
         """Launch once using a unique name. If the response is lost, look up that name.
 
         Return the VM ID only when creation is confirmed. If the VM is not yet visible,
@@ -69,6 +109,8 @@ class MassedComputeAPIClient:
             "sshKeys": [],
             "command": command,
         }
+        if volume_ids:
+            payload["volumeIds"] = volume_ids
         try:
             response = self._request("POST", "/instance/launch", payload)
             return str(_parse_response(_LaunchResponse, response).response)
@@ -94,11 +136,34 @@ class MassedComputeAPIClient:
     def terminate(self, instance_id: str) -> None:
         self._request("POST", "/instance/terminate", {"instanceUuids": [instance_id]})
 
+    def list_volumes(self) -> list[MassedComputeVolume]:
+        return _parse_response(_Volumes, self._request("GET", "/storage-volumes")).volumes
+
+    def create_volume(self, name: str) -> str:
+        payload: _CreateVolumeRequest = {"name": name}
+        response = self._request("POST", "/storage-volumes", payload)
+        return str(_parse_response(_CreatedVolume, response).volume.id)
+
+    def delete_volume(self, volume_id: str) -> None:
+        try:
+            response = self._request(
+                "DELETE", "/storage-volumes/" + quote(volume_id, safe=""), allowed_statuses=(404,)
+            )
+            if (
+                response.status_code == 404
+                or _parse_response(_DeletedVolume, response).result.deleted
+            ):
+                return
+        except (BackendAuthError, ComputeError) as e:
+            raise VolumeDeletionPending(str(e)) from e
+        raise VolumeDeletionPending("MassedCompute is still emptying the volume")
+
     def _request(
         self,
         method: str,
         path: str,
-        payload: Optional[Union[_LaunchRequest, _TerminateRequest]] = None,
+        payload: Optional[Union[_LaunchRequest, _TerminateRequest, _CreateVolumeRequest]] = None,
+        allowed_statuses: tuple[int, ...] = (),
     ) -> requests.Response:
         try:
             response = requests.request(
@@ -113,7 +178,7 @@ class MassedComputeAPIClient:
             raise ComputeError(f"MassedCompute {method} {path}: {type(e).__name__}") from None
         if response.status_code == 401:
             raise BackendAuthError("Invalid MassedCompute API key")
-        if not 200 <= response.status_code < 300:
+        if not 200 <= response.status_code < 300 and response.status_code not in allowed_statuses:
             raise ComputeError(f"MassedCompute {method} {path}: HTTP {response.status_code}")
         return response
 

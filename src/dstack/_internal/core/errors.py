@@ -106,6 +106,18 @@ class ComputeResourceNotFoundError(ComputeError):
     pass
 
 
+class VolumeProvisioningError(ComputeError):
+    """Provisioning failed after the provider allocated a volume that still needs deletion."""
+
+    def __init__(self, message: str, volume_id: str):
+        super().__init__(message)
+        self.volume_id = volume_id
+
+
+class VolumeDeletionPending(ComputeError):
+    """The provider has not confirmed volume deletion. Retry without forgetting the volume."""
+
+
 class PlacementGroupInUseError(ComputeError):
     pass
 

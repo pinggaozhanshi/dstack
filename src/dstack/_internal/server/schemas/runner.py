@@ -198,6 +198,7 @@ class ShimVolumeInfo(CoreModel):
     volume_id: str
     init_fs: bool
     device_name: Optional[str] = None
+    mount_path: Optional[str] = None
 
 
 class PortMapping(CoreModel):

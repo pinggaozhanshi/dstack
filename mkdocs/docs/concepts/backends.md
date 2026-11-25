@@ -1102,7 +1102,7 @@ projects:
           api_key: YOUR_MASSEDCOMPUTE_API_KEY
 ```
 
-MassedCompute provisions single-node, on-demand VMs and selects the site automatically.
+MassedCompute provisions single-node, on-demand VMs and selects the site automatically. It supports experimental [network volumes](volumes.md#network-volumes).
 Offers use the region `any`. Storage support is limited to instance volumes, which
 retain files across jobs on the same VM until the VM is deleted.
 

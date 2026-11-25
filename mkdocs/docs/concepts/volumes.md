@@ -16,7 +16,7 @@ Useful as a cache for cloud fleets or for persistent storage with SSH fleets.
 
 ## Network volumes
 
-> Network volumes are currently supported for the `aws`, `gcp`, `runpod`, `kubernetes`, `daytona`, and `lium` backends.
+> Network volumes are currently supported for the `aws`, `gcp`, `runpod`, `kubernetes`, `daytona`, `lium`, and `massedcompute` backends.
 
 ### Apply a configuration
 
@@ -63,6 +63,28 @@ If you use this configuration, `dstack` will create a new volume based on the sp
     ```
 
     > Files on Lium volumes are owned by root and accessible to all users in the container.
+
+??? info "MassedCompute (experimental)"
+    Enable Persistent Storage in your MassedCompute account. Storage grows with usage.
+    Omit `size` and `region`. To register existing storage, set `volume_id` to its MassedCompute ID.
+
+    ```yaml
+    type: volume
+    backend: massedcompute
+    name: checkpoints
+    ```
+
+    Each VM can attach up to eight volumes at launch. A volume stays attached until that VM
+    is deleted. Jobs can reuse a VM that already has the requested volumes.
+    Use each volume with one VM at a time, including workloads outside dstack.
+
+    On graceful shutdown, dstack flushes the mounts before deleting the VM. If the flush fails,
+    dstack keeps the VM and retries. A retained VM continues to incur compute charges.
+
+    The provider uploads writes in the background. If the VM loses its connection to storage,
+    the provider's flush can report success while uploads are pending. Terminating the VM
+    then can lose recent writes or deletions. Symlinks can reappear as empty files after
+    remount. [Persistent Storage limitations](https://vm-docs.massedcompute.com/docs/persistent-storage/limitations)
 
 ??? info "Kubernetes"
     Set `region` to a kubeconfig context name enabled in the [backend configuration](backends.md#kubernetes).
